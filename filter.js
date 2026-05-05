@@ -1,29 +1,30 @@
-// @match https://www.linkedin.com/feed/*
-// @match https://www.linkedin.com/*
+// ==UserScript==
+// @name         LinkedIn AI-Slop Post Filter
+// @namespace    local.linkedin.ai.filter
+// @version      1.4.0
+// @description  Hide LinkedIn posts that look AI-generated.
+// @match        https://www.linkedin.com/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
 
 (function () {
   "use strict";
 
+  console.log("[AI-Slop Filter] Loaded:", location.href);
+
   const CONFIG = {
-    // Hide matched posts with display:none.
-    hidePosts: true,
-
-    // If true, matching posts are removed from the DOM instead of hidden.
-    removePosts: false,
-
-    // Minimum score needed to hide a post.
-    threshold: 3,
-
-    // Turn on temporarily if you want console logs explaining why a post was hidden.
+    hidePosts: false,
+    removePosts: true,
+    threshold: 4,
     debug: true,
+    scanIntervalMs: 4000,
+    scrollScanDelayMs: 700,
   };
 
   const AI_PATTERNS = [
-    // Em dash specifically.
-    /\u2014/,
-
-    // Common AI / LinkedIn slop phrases.
-    /\bthis\s+(small|simple|quiet|bold)?\s*decision\s+carries\s+a\s+powerful\s+message\b/i, 
+    /\u2014/, // em dash —
+    /\bthis\s+(small|simple|quiet|bold)?\s*decision\s+carries\s+a\s+powerful\s+message\b/i,
     /\bpowerful\s+message\b/i,
     /\bslowly\s+learning\s+to\b/i,
     /\bcelebrate\s+\w+\s+over\s+\w+\b/i,
@@ -48,19 +49,73 @@
     /\buses\s+machine\s+learning\s+to\s+map\b/i,
     /\btranslating\s+human\s+questions\b/i,
     /\bimagine\s+a\s+respectful\b/i,
-    /\bmore\s+than\s+a\s+project\b/i,
-    /\bmore\s+than\s+a\s+product\b/i,
-    /\bnot\s+just\s+a\s+tool\b/i,
-    /\bbridging\s+the\s+gap\b/i,
     /\bat\s+the\s+intersection\s+of\b/i,
+    /\bbridging\s+the\s+gap\b/i,
   ];
 
   function normalizeText(text) {
-    return text
+    return String(text || "")
       .replace(/\u00a0/g, " ")
       .replace(/[ \t]+/g, " ")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
+  }
+
+  function isVisibleElement(el) {
+    if (!(el instanceof HTMLElement)) return false;
+
+    const style = window.getComputedStyle(el);
+
+    return (
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      style.opacity !== "0"
+    );
+  }
+
+  function extractVisibleTextRecursive(root) {
+    const parts = [];
+
+    function walk(node) {
+      if (!node) return;
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        const value = normalizeText(node.nodeValue);
+        if (value) parts.push(value);
+        return;
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+      const el = node;
+      if (!(el instanceof HTMLElement)) return;
+      if (!isVisibleElement(el)) return;
+
+      const tag = el.tagName.toLowerCase();
+
+      if (
+        tag === "script" ||
+        tag === "style" ||
+        tag === "noscript" ||
+        tag === "svg" ||
+        tag === "path"
+      ) {
+        return;
+      }
+
+      if (tag === "button") return;
+
+      for (const child of el.childNodes) {
+        walk(child);
+      }
+        
+        const feedTextElements = new Set('p', 'div', 'span', 'li', 'br');
+        if (feedTextElements.includes(tag) parts.push("\n");
+    }
+
+    walk(root);
+
+    return normalizeText(parts.join(" "));
   }
 
   function getLines(text) {
@@ -68,6 +123,16 @@
       .split(/\n+/)
       .map(line => line.trim())
       .filter(Boolean);
+  }
+
+  function countPatternMatches(text) {
+    let count = 0;
+
+    for (const pattern of AI_PATTERNS) {
+      if (pattern.test(text)) count++;
+    }
+
+    return count;
   }
 
   function hasRepetitiveTripletStructure(lines) {
@@ -82,10 +147,6 @@
       const firstWordB = b.split(/\s+/)[0]?.toLowerCase();
       const firstWordC = c.split(/\s+/)[0]?.toLowerCase();
 
-      // Example:
-      // Not for marketing.
-      // Not for glamour.
-      // But for respect.
       if (
         /^not\s+for\s+/i.test(a) &&
         /^not\s+for\s+/i.test(b) &&
@@ -94,10 +155,6 @@
         return true;
       }
 
-      // Example:
-      // No spotlight.
-      // No applause.
-      // Just courage.
       if (
         /^no\s+/i.test(a) &&
         /^no\s+/i.test(b) &&
@@ -106,7 +163,6 @@
         return true;
       }
 
-      // Same first word twice, then contrast.
       if (
         firstWordA &&
         firstWordA === firstWordB &&
@@ -130,18 +186,6 @@
     return shortLines.length >= 5 && shortLines.length / lines.length > 0.6;
   }
 
-  function countPatternMatches(text) {
-    let count = 0;
-
-    for (const pattern of AI_PATTERNS) {
-      if (pattern.test(text)) {
-        count++;
-      }
-    }
-
-    return count;
-  }
-
   function scorePostText(text) {
     const normalized = normalizeText(text);
     const lines = getLines(normalized);
@@ -155,14 +199,12 @@
       reasons.push(`${patternMatches} phrase/punctuation pattern(s)`);
     }
 
-    // Make em dash an instant strong signal.
     const emDashCount = (normalized.match(/\u2014/g) || []).length;
     if (emDashCount >= 1) {
       score += 10;
       reasons.push(`${emDashCount} em dash character(s)`);
     }
 
-    // Also score en dash, but weaker than em dash.
     const enDashCount = (normalized.match(/\u2013/g) || []).length;
     if (enDashCount >= 1) {
       score += 4;
@@ -187,17 +229,50 @@
       reasons.push("generic inspirational vocabulary");
     }
 
-    return { score, reasons, text: normalized };
+    return {
+      score,
+      reasons,
+      text: normalized,
+    };
   }
 
-  function findPostContainer(element) {
-    return (
-      element.closest(".feed-shared-update-v2") ||
-      element.closest("div[data-urn]") ||
-      element.closest("article") ||
-      element.closest(".update-components-actor")?.closest("div") ||
-      element
-    );
+  function getFeedContainers() {
+    return Array.from(
+      document.querySelectorAll(
+        'div[data-testid="mainFeed"], div[role="list"][data-component-type="LazyColumn"]'
+      )
+    ).filter(el => el instanceof HTMLElement);
+  }
+
+  function looksLikeFeedItem(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    if (el.matches('div[data-testid="mainFeed"]')) return false;
+
+    const text = extractVisibleTextRecursive(el);
+    if (text.length < 40) return false;
+
+    return true;
+  }
+
+  function getFeedPosts() {
+    const feeds = getFeedContainers();
+
+    if (CONFIG.debug) {
+      console.log(`[AI-Slop Filter] Feed containers found: ${feeds.length}`);
+    }
+
+    const posts = [];
+
+    for (const feed of feeds) {
+      // Direct children are the safest post containers.
+      // Text inside each child is extracted recursively.
+      for (const child of feed.children) {
+        if (!(child instanceof HTMLElement)) continue;
+        if (looksLikeFeedItem(child)) posts.push(child);
+      }
+    }
+
+    return posts;
   }
 
   function markPost(post, result) {
@@ -205,21 +280,16 @@
 
     post.dataset.aiSlopFiltered = "true";
 
-    if (CONFIG.debug) {
-      console.group("LinkedIn AI-slop filtered post");
-      console.log("Score:", result.score);
-      console.log("Reasons:", result.reasons);
-      console.log("Text:", result.text);
-      console.log("Element:", post);
-      console.groupEnd();
-    }
+    console.group("[AI-Slop Filter] Hidden post");
+    console.log("Score:", result.score);
+    console.log("Reasons:", result.reasons);
+    console.log("Text:", result.text);
+    console.log("Element:", post);
+    console.groupEnd();
 
     if (CONFIG.removePosts) {
       post.remove();
-      return;
-    }
-
-    if (CONFIG.hidePosts) {
+    } else if (CONFIG.hidePosts) {
       post.style.display = "none";
     }
   }
@@ -227,16 +297,22 @@
   function scanPost(post) {
     if (!post) return;
 
-    const text = normalizeText(post.innerText || "");
+    const text = extractVisibleTextRecursive(post);
     if (!text || text.length < 40) return;
     if (post.dataset.aiSlopLastText === text) return;
     post.dataset.aiSlopLastText = text;
 
-    if (CONFIG.debug && text.includes("—")) {
-      console.log("LinkedIn AI-slop filter: found em dash post", post, text);
-    }
-
     const result = scorePostText(text);
+
+    if (CONFIG.debug) {
+      console.log("[AI-Slop Filter] Scanned post:", {
+        score: result.score,
+        reasons: result.reasons,
+        hasEmDash: text.includes("—"),
+        preview: text.slice(0, 300),
+        element: post,
+      });
+    }
 
     if (result.score >= CONFIG.threshold) {
       markPost(post, result);
@@ -244,27 +320,25 @@
   }
 
   function scanPage() {
-    const possiblePosts = document.querySelectorAll(`
-      .feed-shared-update-v2,
-      div[data-urn],
-      article
-    `);
+    const posts = getFeedPosts();
 
-    possiblePosts.forEach(post => {
-      const container = findPostContainer(post);
-      scanPost(container);
-    });
+    if (CONFIG.debug) {
+      console.log(`[AI-Slop Filter] Candidate posts found: ${posts.length}`);
+    }
+
+    for (const post of posts) {
+      scanPost(post);
+    }
   }
 
-  function observeFeed() {
-    let scanTimer = null;
+  function scheduleScan(delay = 250) {
+    clearTimeout(scheduleScan.timer);
+    scheduleScan.timer = setTimeout(scanPage, delay);
+  }
 
+  function observePage() {
     const observer = new MutationObserver(() => {
-      clearTimeout(scanTimer);
-
-      scanTimer = setTimeout(() => {
-        scanPage();
-      }, 300);
+      scheduleScan(250);
     });
 
     observer.observe(document.body, {
@@ -274,29 +348,70 @@
     });
   }
 
+  function observeScroll() {
+    let lastY = window.scrollY;
+
+    window.addEventListener(
+      "scroll",
+      () => {
+        const currentY = window.scrollY;
+        const moved = Math.abs(currentY - lastY);
+
+        if (moved > 150) {
+          lastY = currentY;
+          scheduleScan(CONFIG.scrollScanDelayMs);
+          setTimeout(scanPage, CONFIG.scrollScanDelayMs + 1000);
+        }
+      },
+      { passive: true }
+    );
+  }
+
+  function hookHistoryNavigation() {
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+
+    history.pushState = function (...args) {
+      originalPushState.apply(this, args);
+      setTimeout(scanPage, 500);
+    };
+
+    history.replaceState = function (...args) {
+      originalReplaceState.apply(this, args);
+      setTimeout(scanPage, 500);
+    };
+
+    window.addEventListener("popstate", () => {
+      setTimeout(scanPage, 500);
+    });
+  }
+
   function addManualRescanShortcut() {
     window.addEventListener("keydown", event => {
-      if (event.ctrlKey && event.key.toLowerCase() === "m") {
+      if (event.ctrlKey && event.altKey && event.key.toLowerCase() === "f") {
         document
           .querySelectorAll("[data-ai-slop-last-text]")
           .forEach(el => delete el.dataset.aiSlopLastText);
 
+        console.log("[AI-Slop Filter] Manual rescan triggered");
         scanPage();
-
-        if (CONFIG.debug) {
-          console.log("LinkedIn AI-slop filter: manual rescan complete.");
-        }
       }
     });
   }
 
   function start() {
+    console.log("[AI-Slop Filter] Starting scanner");
+
     scanPage();
-    observeFeed();
+    observePage();
+    observeScroll();
+    hookHistoryNavigation();
     addManualRescanShortcut();
+
     setTimeout(scanPage, 1000);
     setTimeout(scanPage, 2500);
     setTimeout(scanPage, 5000);
+    setInterval(scanPage, CONFIG.scanIntervalMs);
   }
 
   if (document.readyState === "loading") {
